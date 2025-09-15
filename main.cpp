@@ -1,41 +1,61 @@
 #include <fstream>
 #include <iostream>
 #include <random>
+#include <thread>
+#include <vector>
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_render.h>
-#include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_events.h>
 
-using u8 = uint8_t;
-using u16 = uint16_t;
-
-#define PIXEL_SIZE 10
-
 struct Chip8 {
-    u8 memory[4096]{};
-    u8 V[16]{};
-    u16 I = 0;
-    u16 PC = 0x200;
-    u8 delayTimer = 0;
-    u8 soundTimer = 0;
-    u16 stack[16]{};
-    u8 SP = 0;
+    uint8_t memory[4096]{};
+    uint8_t V[16]{};
+    uint16_t I = 0;
+    uint16_t PC = 0x200;
+    uint8_t delayTimer = 0;
+    uint8_t soundTimer = 0;
+    uint16_t stack[16]{};
+    uint8_t SP = 0;
 
     static constexpr int WIDTH = 64;
     static constexpr int HEIGHT = 32;
-    u8 gfx[WIDTH * HEIGHT]{};
+    uint8_t gfx[WIDTH * HEIGHT]{};
+    bool drawFlag = false;
 
-    u8 keys[16]{};
+    uint8_t keys[16]{};
 
     std::mt19937 rng{std::random_device{}()};
 
-    bool drawFlag = false;
+    Chip8() {
+        static const uint8_t fontset[80] = {
+            0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
+            0x20, 0x60, 0x20, 0x20, 0x70, // 1
+            0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
+            0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
+            0x90, 0x90, 0xF0, 0x10, 0x10, // 4
+            0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
+            0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
+            0xF0, 0x10, 0x20, 0x40, 0x40, // 7
+            0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
+            0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
+            0xF0, 0x90, 0xF0, 0x90, 0x90, // A
+            0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
+            0xF0, 0x80, 0x80, 0x80, 0xF0, // C
+            0xE0, 0x90, 0x90, 0x90, 0xE0, // D
+            0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
+            0xF0, 0x80, 0xF0, 0x80, 0x80  // F
+        };
+
+        for (int i = 0; i < 80; i++) {
+            memory[i] = fontset[i];
+        }
+    }
 
     bool loadROM(const std::string &path) {
         std::ifstream file{path, std::ios::binary};
         if (!file) return false;
 
-        std::vector<u8> buffer((std::istreambuf_iterator(file)), std::istreambuf_iterator<char>());
+        std::vector<uint8_t> buffer((std::istreambuf_iterator(file)), std::istreambuf_iterator<char>());
 
         std::cout << "ROM size: " << buffer.size() << " bytes\n";
 
@@ -46,25 +66,22 @@ struct Chip8 {
     }
 
     void step() {
-        int i = 0;
+        const uint16_t opcode = memory[PC] << 8 | memory[PC + 1];
 
-        const u16 opcode = memory[PC] << 8 | memory[PC + 1];
+        const uint8_t x = opcode >> 8 & 0x000F;
+        const uint8_t y = opcode >> 4 & 0x000F;
+        const uint8_t n = opcode & 0x000F;
+        const uint8_t nn = opcode & 0x00FF;
+        const uint16_t nnn = opcode & 0x0FFF;
 
-        const u8 x = opcode >> 8 & 0x000F;
-        const u8 y = opcode >> 4 & 0x000F;
-        const u8 n = opcode & 0x000F;
-        const u8 nn = opcode & 0x00FF;
-        const u16 nnn = opcode & 0x0FFF;
-
-        u16 nextPC = PC + 2;
-
-        // printf("PC: 0x%04x Op: 0x%04x\n", PC, opcode);
+        uint16_t nextPC = PC + 2;
 
         switch (opcode & 0xF000) {
             case 0x0000:
                 switch (nn) {
                     case 0x00E0:
-                        // TODO
+                        std::fill(std::begin(gfx), std::end(gfx), 0);
+                        drawFlag = true;
                         break;
                     case 0x00EE:
                         nextPC = stack[--SP];
@@ -134,12 +151,10 @@ struct Chip8 {
                 }
                 break;
             case 0x9000:
-                switch (n) {
-                    case 0x0:
-                        nextPC = V[x] != V[y] ? PC + 4 : PC + 2;
-                        break;
-                    default:
-                        unknownOpcode(opcode);
+                if (n) {
+                    nextPC = V[x] != V[y] ? PC + 4 : PC + 2;
+                } else {
+                    unknownOpcode(opcode);
                 }
                 break;
             case 0xA000:
@@ -171,18 +186,22 @@ struct Chip8 {
                     case 0x07:
                         V[x] = delayTimer;
                         break;
-                    case 0x0A:
-                        i = 0;
-                        while (true) {
-                            for (i = 0; i < 16; i++) {
-                                if (keys[i]) {
-                                    V[x] = i;
-                                    goto got_key_press;
-                                }
+                    case 0x0A: {
+                        bool keyPressed = false;
+
+                        for (int i = 0; i < 16; i++) {
+                            if (keys[i]) {
+                                V[x] = i;
+                                keyPressed = true;
+                                break;
                             }
                         }
-                    got_key_press:
+
+                        if (!keyPressed) {
+                            nextPC -= 2;
+                        }
                         break;
+                    }
                     case 0x15:
                         delayTimer = V[x];
                         break;
@@ -197,17 +216,15 @@ struct Chip8 {
                         I = 5 * V[x];
                         break;
                     case 0x33:
-                        memory[I] = V[x] % 1000 / 100;
-                        memory[I + 1] = V[x] % 100 / 10;
+                        memory[I]     = V[x] / 100;
+                        memory[I + 1] = V[x] / 10 % 10;
                         memory[I + 2] = V[x] % 10;
                         break;
                     case 0x55:
-                        for (i = 0; i <= x; i++) { memory[I + i] = V[i]; }
-                        I += x + 1;
+                        for (int i = 0; i <= x; i++) { memory[I + i] = V[i]; }
                         break;
                     case 0x65:
-                        for (i = 0; i <= x; i++) { V[i] = memory[I + i]; }
-                        I += x + 1;
+                        for (int i = 0; i <= x; i++) { V[i] = memory[I + i]; }
                         break;
                     default:
                         unknownOpcode(opcode);
@@ -220,17 +237,17 @@ struct Chip8 {
         PC = nextPC;
     }
 
-    void drawSprite(const u8 xPos, const u8 yPos, const u8 height) {
+    void drawSprite(const uint8_t xPos, const uint8_t yPos, const uint8_t height) {
         V[0xF] = 0;
 
         for (int row = 0; row < height; row++) {
-            u8 spriteByte = memory[I + row];
+            const uint8_t spriteByte = memory[I + row];
 
             for (int col = 0; col < 8; col++) {
                 if ((spriteByte & 0x80 >> col) != 0) {
-                    int x = (xPos + col) % WIDTH;
-                    int y = (yPos + row) % HEIGHT;
-                    int index = y * WIDTH + x;
+                    const int x = (xPos + col) % WIDTH;
+                    const int y = (yPos + row) % HEIGHT;
+                    const int index = y * WIDTH + x;
 
                     if (gfx[index] == 1) {
                         V[0xF] = 1;
@@ -269,8 +286,7 @@ struct Chip8 {
         }
     }
 
-
-    static void unknownOpcode(const u16 opcode) {
+    static void unknownOpcode(const uint16_t opcode) {
         std::cout << "Unknown opcode: " << std::hex << opcode << "\n";
     }
 };
@@ -305,39 +321,21 @@ int main(const int argc, char *argv[]) {
         Chip8::HEIGHT
     );
 
+    SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST);
+
     bool running = true;
 
-    constexpr int CPU_HZ = 400;
-    constexpr float CPU_MS_PER_STEP = 1000.0f / CPU_HZ;
+    constexpr int CPU_HZ    = 400;
+    constexpr int TIMER_HZ  = 60;
+    constexpr int CPU_DELAY   = 1000 / CPU_HZ;
+    constexpr int TIMER_DELAY = 1000 / TIMER_HZ;
 
-    float cpuTimer = 0.0f;
+    SDL_Event e;
 
-    constexpr int TIMER_HZ = 60;
-    constexpr float TIMER_MS_PER_STEP = 1000.0f / TIMER_HZ;
-    float timerAccumulator = 0.0f;
-
-    Uint32 lastTicks = SDL_GetTicks();
+    auto lastCpuTick   = std::chrono::high_resolution_clock::now();
+    auto lastTimerTick = std::chrono::high_resolution_clock::now();
 
     while (running) {
-        const Uint32 now = SDL_GetTicks();
-        const auto delta = static_cast<float>(now - lastTicks);
-        lastTicks = now;
-
-        cpuTimer += delta;
-        timerAccumulator += delta;
-
-        while (timerAccumulator >= TIMER_MS_PER_STEP) {
-            if (chip8.delayTimer > 0) chip8.delayTimer--;
-            if (chip8.soundTimer > 0) chip8.soundTimer--;
-            timerAccumulator -= TIMER_MS_PER_STEP;
-        }
-
-        while (cpuTimer >= CPU_MS_PER_STEP) {
-            chip8.step();
-            cpuTimer -= CPU_MS_PER_STEP;
-        }
-
-        SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT) running = false;
 
@@ -349,27 +347,42 @@ int main(const int argc, char *argv[]) {
             }
         }
 
-        if (chip8.drawFlag) {
-            uint32_t pixels[Chip8::WIDTH * Chip8::HEIGHT];
+        auto now = std::chrono::high_resolution_clock::now();
 
-            for (int i = 0; i < Chip8::WIDTH * Chip8::HEIGHT; i++) {
-                pixels[i] = chip8.gfx[i] ? 0xFFFFFFFF : 0xFF000000;
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastCpuTick).count() >= CPU_DELAY) {
+            chip8.step();
+            lastCpuTick = now;
+        }
+
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTimerTick).count() >= TIMER_DELAY) {
+            if (chip8.delayTimer > 0) chip8.delayTimer--;
+            if (chip8.soundTimer > 0) chip8.soundTimer--;
+
+            if (chip8.drawFlag) {
+                uint32_t pixels[Chip8::WIDTH * Chip8::HEIGHT];
+
+                for (int i = 0; i < Chip8::WIDTH * Chip8::HEIGHT; i++) {
+                    pixels[i] = chip8.gfx[i] ? 0xFFFFFFFF : 0xFF000000;
+                }
+
+                SDL_UpdateTexture(texture, nullptr, pixels, Chip8::WIDTH * sizeof(uint32_t));
+                SDL_RenderClear(renderer);
+
+                SDL_RenderTexture(renderer, texture, nullptr, nullptr);
+                SDL_RenderPresent(renderer);
+
+                chip8.drawFlag = false;
             }
 
-            SDL_UpdateTexture(texture, nullptr, pixels, Chip8::WIDTH * sizeof(uint32_t));
-            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-            SDL_RenderClear(renderer);
-
-            SDL_FRect dst = {0, 0, Chip8::WIDTH * PIXEL_SIZE, Chip8::HEIGHT * PIXEL_SIZE};
-            SDL_RenderTexture(renderer, texture, nullptr, &dst);
-
-            SDL_RenderPresent(renderer);
-            chip8.drawFlag = false;
+            lastTimerTick = now;
         }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
+
     return 0;
 }
